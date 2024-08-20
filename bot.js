@@ -2,9 +2,9 @@ const fs = require('node:fs');
 const util = require('util')
 const path = require('node:path');
 require('dotenv').config()
+const { model } = require("./config.json")
 const logger = require('./logger');
 const { Client, Events, GatewayIntentBits, Collection } = require('discord.js');
-const { DEFAULT_ACTIVITY } = require('./config.json');
 const TOKEN = process.env.TOKEN
 
 //JSON.stringify complains when running into a BigInt for some reason, this happens when JSON.toString() is called on interaction object
@@ -53,7 +53,7 @@ for (const file of interactionFiles) {
 // When the client is ready, run this code (only once)
 client.once(Events.ClientReady, () => {
   logger.info(`Logged in as ${client.user.tag}!`);
-  client.user.setActivity(DEFAULT_ACTIVITY);
+  client.user.setActivity(`${model}`);
   client.application.commands.set([])
 });
 

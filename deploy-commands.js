@@ -29,7 +29,7 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
   return logger.error('Missing CLIENT_ID')
     try {
     const data = await rest.put(
-      Routes.applicationCommands(CLIENT_ID),
+      // Routes.applicationCommands(CLIENT_ID),
       Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
       { body: commands },
       // { body: [] }, // to erase commands
