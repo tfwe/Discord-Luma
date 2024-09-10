@@ -1,3 +1,4 @@
+
 const axios = require('axios');
 const { OWNER_ID, CLIENT_ID } = process.env;
 const fs = require('fs');
@@ -6,16 +7,23 @@ const fetch = require('node-fetch');
 const logger = require('../logger');
 const { getAIResponse } = require('../utils/llmRequests');
 const { model } = require("../config.json");
-
 const PLOTS_DIR = path.resolve(__dirname, '../plots');
-const SYSTEM_PROMPT_FILE = path.resolve(__dirname, '../utils/system_prompt.txt'); // specify the file
+const IMAGES_DIR = path.resolve(__dirname, '../images');
+const LATEX_DIR = path.resolve(__dirname, '../latex');
+const SYSTEM_PROMPT_FILE = path.resolve(__dirname, '../utils/system_prompt.txt');
 const AUDIO_DIR = path.resolve(__dirname, '../audio');
+const PYTHON_DIR = path.resolve(__dirname, '../python');
+
 if (!fs.existsSync(AUDIO_DIR)) fs.mkdirSync(AUDIO_DIR);
+if (!fs.existsSync(IMAGES_DIR)) fs.mkdirSync(IMAGES_DIR);
+if (!fs.existsSync(PYTHON_DIR)) fs.mkdirSync(PYTHON_DIR);
+if (!fs.existsSync(LATEX_DIR)) fs.mkdirSync(LATEX_DIR);
 
 async function buildMessageChain(message) {
     logger.info('Building message chain...');
     const messages = [];
     let msg = message;
+    const MAX_MESSAGES = 6;
 
     // Read system prompt from file
     let systemPrompt;
@@ -42,26 +50,26 @@ async function buildMessageChain(message) {
     while (msg) {
         let embedText = msg.embeds.map(embedToMarkdown).join('');
         let fileText = "", imageContent = [], transcribedText = "";
-
         if (msg.attachments.size) {
             logger.debug(`Processing ${msg.attachments.size} attachments.`);
             for (let attachment of msg.attachments.values()) {
                 if (attachment.contentType?.includes('text')) {
-                    let text = await (await fetch(attachment.attachment)).text();
-                    fileText += `\n\n---File: ${attachment.name}---\n${text}\n---EOF---\n`;
+                  let text = await (await fetch(attachment.attachment)).text();
+                  fileText += `\n\n---File: ${attachment.name}---\n${text}\n---EOF---\n`;
                 }
                 if (attachment.contentType?.includes('image')) {
-                    imageContent.push({ type: "image_url", image_url: { "url": attachment.url } });
+                  imageContent.push({ type: "image_url", image_url: { "url": attachment.url } });
+                }
+                if (attachment.contentType?.includes('audio')) {
+                  fileText += `\n\n---Audio File: ${attachment.name}--URL For Transcription: \n${attachment.url}---\n`
                 }
             }
         }
-
         let messageContent = { role: 'user', content: [{ type: "text", text: `${msg.content}${embedText}${fileText}${transcribedText}` }, ...imageContent] };
         if (msg.author.bot || !['gpt-4o', 'gpt-4o-mini'].includes(model)) {
             messageContent.content = `${msg.content}${embedText}${fileText}${transcribedText}`;
             if (msg.author.bot) messageContent.role = 'assistant';
         }
-
         messages.unshift(messageContent);
         logger.debug(`Message ID ${msg.id} added to chain.`);
         msg = msg.reference?.messageId ? await msg.channel.messages.fetch(msg.reference.messageId).catch(() => null) : null;
@@ -70,12 +78,30 @@ async function buildMessageChain(message) {
     // Insert system and assistant prompt at the beginning of the messages array
     messages.unshift(
         { role: 'system', content: systemPrompt },
-        { role: 'assistant', content: `Got it. Let's tackle any problem you have step by step, ensuring clarity and correctness. I always show the code that I execute and I always execute the code that I show, when it's safe of course.` }
+        { role: 'assistant', content: `## Understanding of the Problem
+My role is to help you with tasks and answer your questions. I'll break down problems step-by-step, review each part, and suggest improvements when needed.
+
+## First Task
+What do you need help with today? Let me know, and I'll get started.` }
     );
+
+    // Ensure alternating user and assistant roles
+    for (let i = 1; i < messages.length; i++) {
+        if (messages[i].role === messages[i-1].role) {
+            messages.splice(i, 1);
+            i--;
+        }
+    }
+
+    // Truncate to MAX_MESSAGES, keeping the most recent ones
+    if (messages.length > MAX_MESSAGES + 1) {  // +1 for system message
+        messages.splice(1, messages.length - (MAX_MESSAGES + 1));
+    }
 
     logger.info('Message chain built successfully.');
     return messages;
 }
+
 
 module.exports = {
     name: 'messageCreate',
@@ -89,18 +115,37 @@ module.exports = {
             logger.debug(`Message does not mention the bot (ID: ${CLIENT_ID}). Ignoring.`);
             return;
         }
-        if (message.author.id !== OWNER_ID) 
-            return await message.reply("Contact @tfw_e for access. \nhttps://paypal.me/CarloFlores");
+        // if (message.author.id !== OWNER_ID)
+            // return await message.reply("Contact @tfw_e for access. \nhttps://paypal.me/CarloFlores");
 
         const messages = await buildMessageChain(message);
         await message.channel.sendTyping();
         const aiResponse = await getAIResponse(messages);
+
         let msgObj = { content: aiResponse, files: [] };
 
-        fs.readdirSync('.').filter(f => f.endsWith('.png')).forEach(f => fs.renameSync(f, path.join(PLOTS_DIR, f)));
-        const plotFiles = fs.readdirSync(PLOTS_DIR).filter(f => f.endsWith('.png')).map(f => path.join(PLOTS_DIR, f));
-        plotFiles.forEach(f => msgObj.files.push(f));
+        // Move plot files
+        fs.readdirSync('.')
+          .filter(f => f.endsWith('.png') || f.endsWith('.gif'))
+          .forEach(f => fs.renameSync(f, path.join(PLOTS_DIR, f)));
 
+        // Add plot files to message
+        const plotFiles = fs.readdirSync(PLOTS_DIR)
+          .filter(f => f.endsWith('.png') || f.endsWith('.gif'))
+          .map(f => path.join(PLOTS_DIR, f));
+        plotFiles.forEach(f => msgObj.files.push(f));        // Add generated images to the message
+
+        const imageFiles = fs.readdirSync(IMAGES_DIR).filter(f => f.endsWith('.png')).map(f => path.join(IMAGES_DIR, f));
+        imageFiles.forEach(f => msgObj.files.push(f));
+
+        // Add rendered LaTeX files to the message
+        const latexFiles = fs.readdirSync(LATEX_DIR).filter(f => f.endsWith('.png')).map(f => path.join(LATEX_DIR, f));
+        latexFiles.forEach(f => msgObj.files.push(f));
+
+        // Add python files to the message
+        const pythonFiles = fs.readdirSync(PYTHON_DIR).filter(f => f.endsWith('.py')).map(f => path.join(PYTHON_DIR, f));
+        pythonFiles.forEach(f => msgObj.files.push(f));
+        const audioFiles = fs.readdirSync(AUDIO_DIR).filter(f => f.endsWith('.mp3')).map(f => path.join(AUDIO_DIR, f));
         if (aiResponse.length > 2000) {
             const filename = 'output.txt';
             fs.writeFileSync(filename, aiResponse);
@@ -110,13 +155,25 @@ module.exports = {
         }
 
         try {
+            logger.info(JSON.stringify(msgObj));
             await message.reply(msgObj);
             logger.info('Response sent to the message channel.');
 
+            // Clean up files
             plotFiles.forEach(f => fs.unlinkSync(f));
+            imageFiles.forEach(f => fs.unlinkSync(f));
+            latexFiles.forEach(f => fs.unlinkSync(f));
+            pythonFiles.forEach(f => fs.unlinkSync(f));
+            audioFiles.forEach(f => fs.unlinkSync(f));
             if (fs.existsSync('output.txt')) fs.unlinkSync('output.txt');
-            fs.readdirSync(AUDIO_DIR).forEach(f => fs.unlinkSync(path.join(AUDIO_DIR, f)));
         } catch (error) {
+            // Clean up files
+            plotFiles.forEach(f => fs.unlinkSync(f));
+            imageFiles.forEach(f => fs.unlinkSync(f));
+            latexFiles.forEach(f => fs.unlinkSync(f));
+            pythonFiles.forEach(f => fs.unlinkSync(f));
+            audioFiles.forEach(f => fs.unlinkSync(f));
+            if (fs.existsSync('output.txt')) fs.unlinkSync('output.txt');
             logger.error(`Unexpected error occurred while sending response: ${error}`);
             await message.reply(`Unexpected error occurred:\n\`\`\`${error}\`\`\``);
         }

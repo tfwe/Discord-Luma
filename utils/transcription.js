@@ -14,7 +14,7 @@ if (!fs.existsSync(AUDIO_DIR)) {
 }
 
 // Helper function to download a file
-async function downloadFile(url, outputPath) {
+async function downloadFile(url, outputPath=path.join(AUDIO_DIR, `audio.mp3`)) {
     const response = await fetch(url);
     const fileStream = fs.createWriteStream(outputPath);
     await new Promise((resolve, reject) => {
@@ -26,7 +26,7 @@ async function downloadFile(url, outputPath) {
 
 // Function to transcribe MP3 using OpenAI Whisper
 async function transcribeMp3(filePath) {
-    const model = 'whisper-large-v3';
+    const model = 'distil-whisper-large-v3-en';
     const fileStream = fs.createReadStream(filePath);
     const response = await client.audio.transcriptions.create({
         file: fileStream,
@@ -35,8 +35,8 @@ async function transcribeMp3(filePath) {
     return response.text;
 }
 
-// Function to fetch video details and transcribe audio
-async function fetchVideoDetailsAndTranscribe(videoId) {
+// Function to fetch youtube video details and transcribe audio
+async function fetchYoutubeDetailsAndTranscribe(videoId) {
     const options = {
         method: 'GET',
         url: 'https://yt-api.p.rapidapi.com/dl',
@@ -69,4 +69,4 @@ async function fetchVideoDetailsAndTranscribe(videoId) {
     }
 }
 
-module.exports = { downloadFile, transcribeMp3, fetchVideoDetailsAndTranscribe };
+module.exports = { downloadFile, transcribeMp3, fetchYoutubeDetailsAndTranscribe };

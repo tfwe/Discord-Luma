@@ -1,45 +1,24 @@
-const assert = require('node:assert');
-const Anthropic = require('@anthropic-ai/sdk');
+const path = require('path');
 const OpenAI = require('openai');
 const { Groq } = require('groq-sdk');
 const logger = require('../logger');
-const { executePython } = require('../utils/pythonExecutor');
-const { downloadFile, transcribeMp3, fetchVideoDetailsAndTranscribe } = require('../utils/transcription');
 const { model } = require("../config.json");
+const { executePython } = require('../utils/pythonExecutor');
+const { fetchYoutubeDetailsAndTranscribe, downloadFile, transcribeMp3 } = require('../utils/transcription');
+const { createAnthropicResponse } = require('./anthropicHandler');
+const { generateImage } = require('../utils/imageGenerator');
+const { renderLatex } = require('../utils/renderLatex'); // Import the LaTeX rendering utility
+
 // Initialize AI models
 let openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const anthro = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 if (model === 'meta-llama/Meta-Llama-3.1-405B-Instruct') {
-  openai = new OpenAI({ apiKey: process.env.DEEPINFRA_API_KEY,
-  base_url: "https://api.deepinfra.com/v1/openai"});
+  openai = new OpenAI({
+    apiKey: process.env.DEEPINFRA_API_KEY,
+    baseURL: 'https://api.deepinfra.com/v1/openai',
+  });
 }
-// Define anthropic tools
-const anthropicTools = [
-  {
-    name: 'execute_python',
-    description: 'Execute Python code from file',
-    input_schema: {
-      type: 'object',
-      properties: {
-        code: { type: 'string' }
-      },
-      required: ['code']
-    },
-  },
-  {
-    name: 'transcribe_youtube',
-    description: 'Convert YouTube video to MP3, Transcribe and return text',
-    input_schema: {
-      type: 'object',
-      properties: {
-        url: { type: 'string' }
-      },
-      required: ['url']
-    },
-  },
-];
+const AUDIO_DIR = path.resolve(__dirname, '../audio');
 
 // Define common tools
 const commonTools = [
@@ -47,7 +26,7 @@ const commonTools = [
     type: "function",
     function: {
       name: "execute_python",
-      description: "Execute Python code from file...",
+      description: "Execute Python code from file. All code must include print statements. Code using matplotlib must contain `.savefig()`.",
       parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"], additionalProperties: false },
       strict: true
     },
@@ -63,31 +42,51 @@ const commonTools = [
     },
     strict: true,
   },
+  {
+    type: "function",
+    function: {
+      name: "transcribe_audio",
+      description: "MP3 from discord attachment URL and returns string transcription",
+      parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"], additionalProperties: false },
+      strict: true
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    function: {
+      name: "generate_image",
+      description: "Generate an image from text prompt. Leave the URL field empty unless you are specifically provided with an image url to use. Max 2000 characters.",
+      parameters: { type: "object", properties: { prompt: { type: "string" }, }, required: ["prompt"], additionalProperties: false },
+      strict: true
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    function: {
+      name: "render_latex",
+      description: "Render a LaTeX snippet to png image and save it",
+      parameters: { type: "object", properties: { latexSnippet: { type: "string" } }, required: ["latexSnippet"], additionalProperties: false },
+      strict: true
+    },
+    strict: true,
+  }
 ];
 
-/**
- * Get AI response from the given messages and model.
- * @param {Array} messages - Array of message objects with role and content.
- * @param {string} model - The AI model to use.
- * @returns {string} The AI response.
- */
 async function getAIResponse(messages) {
   try {
     logger.info('Fetching AI response...');
-
-    // Format messages for AI model
     const content = messages.map(m => ({ role: m.role, content: m.content }));
     const payload = { model, messages: content, max_tokens: 4096 };
-
-    let completion;
+    logger.info(model)
+    logger.info(payload)
     if (model.startsWith('claude')) {
       // Use Anthropic model
-      completion = await createAnthropicResponse(messages, model);
-      return completion;
+      return await createAnthropicResponse(messages, model);
     } else {
       // Use OpenAI or Groq model
       payload.tools = commonTools;
-
       if (model !== 'gpt-4o' && model !== 'gpt-4o-mini') {
         // Handle Groq models
         completion = await groq.chat.completions.create(payload);
@@ -95,7 +94,6 @@ async function getAIResponse(messages) {
         // Handle OpenAI models
         completion = await openai.chat.completions.create(payload);
       }
-
       return await handleToolCalls(completion, messages, payload, model);
     }
   } catch (error) {
@@ -104,151 +102,68 @@ async function getAIResponse(messages) {
   }
 }
 
-/**
- * Create Anthropic response from the given messages and model.
- * @param {Array} messages - Array of message objects with role and content.
- * @param {string} model - The Anthropic model to use.
- * @returns {string} The Anthropic response.
- */
-async function createAnthropicResponse(messages, model) {
-  // Format messages for Anthropic model
-  let formattedMessages = messages.map(m => ({
-    role: (m.role === 'system') ? 'user' : m.role,
-    content: m.content
-  }));
-
-  // Create Anthropic completion
-  const completion = await anthro.messages.create({
-    model,
-    max_tokens: 4096,
-    messages: formattedMessages,
-    tools: anthropicTools,
-  });
-
-
-  if (completion.stop_reason === 'tool_use') {
-    // Handle tool calls
-    finalResponse = await handleToolCalls(completion, formattedMessages,{}, model);
-    return finalResponse
-  }
-
-  // Return Anthropic response
-  return completion.content[0].text;
-}
-/**
- * Handle tool calls from the given completion and messages.
- * @param {Object} completion - The completion object from the AI model.
- * @param {Array} messages - Array of message objects with role and content.
- * @param {Object} payload - The payload object for the AI model.
- * @param {string} model - The AI model to use.
- * @returns {string} The final AI response.
- */
 async function handleToolCalls(completion, messages, payload, model) {
-  let toolCalls;
-  if (model.startsWith('claude')) {
-    // Get tool calls from Anthropic completion
-    toolCalls = completion.content.filter(content => content.type === 'tool_use');
-  } else {
-    // Get tool calls from OpenAI or Groq completion
-    toolCalls = completion.choices[0].message.tool_calls;
-  }
-
+  const toolCalls = completion.choices[0].message.tool_calls;
   if (toolCalls && toolCalls.length > 0) {
-    // Handle each tool call
     const results = await Promise.all(toolCalls.map(async (toolCall) => {
-      const toolResult = await handleToolCall(toolCall, model);
-      if (model.startsWith('claude')) {
-        return {
-          role: 'user', 
-          content: JSON.stringify({ toolResult }),
-          tool_use_id: toolCall.id
-        }
-      };
+      const toolResult = await handleToolCall(toolCall);
       return {
         role: 'tool',
         content: JSON.stringify({ result: toolResult }),
         tool_call_id: toolCall.id
       };
     }));
-
-    // Filter out undefined results
     const functionCallResultMessages = results.filter(result => result !== undefined);
     logger.info(`Tool execution results: ${JSON.stringify(functionCallResultMessages)}`);
-
-    // Create a new completion with the tool results
-    if (model.startsWith('claude')) {
-      // Use Anthropic model
-      logger.info(toolCalls)
-      const result = await anthro.messages.create({
-        model,
-        max_tokens: 4096,
-        messages: [
-          ...messages,
-          {
-            role: 'assistant', 
-            content: toolCalls,  
-          },
-          ...functionCallResultMessages.map(m => ({
-            role: 'user',
-            content: [{
-              type: 'tool_result',
-              tool_use_id: m.tool_use_id,
-              content: [{ type: 'text', text: m.content }],
-            }],
-          }))
-        ],
-        tools: anthropicTools,
-      });
-      return result.content[0].text;
-    } else {
-      // Use OpenAI or Groq model
-      const completionPayload = {
-        model: model,
-        messages: [...messages, completion.choices[0].message, ...functionCallResultMessages],
-        tools: commonTools
-      };
-      const finalResponse = await (model !== 'gpt-4o' && model !== 'gpt-4o-mini' ? groq.chat.completions.create(completionPayload) : openai.chat.completions.create(completionPayload));
-      logger.info('Final AI response ready to be returned.');
-      return finalResponse.choices[0].message.content;
-    }
+    const completionPayload = {
+      model: model,
+      messages: [...messages, completion.choices[0].message, ...functionCallResultMessages],
+      tools: commonTools
+    };
+    const finalResponse = await (model !== 'gpt-4o' && model !== 'gpt-4o-mini'
+      ? groq.chat.completions.create(completionPayload)
+      : openai.chat.completions.create(completionPayload));
+    logger.info('Final AI response ready to be returned.');
+    // Add generated images to final response
+    const finalContent = finalResponse.choices[0].message.content;
+    return finalContent;
   }
-
-  // Return the original completion content
-  return model.startsWith('claude') ? completion.content[0].text : completion.choices[0].message.content;
+  return completion.choices[0].message.content;
 }
 
-/**
- * Handle a single tool call.
- * @param {Object} toolCall - The tool call object.
- * @returns {string} The result of the tool call.
- */
-async function handleToolCall(toolCall, model) {
-  let functionName, functionArguments;
-  if (model.startsWith('claude')) {
-    // Get function name and arguments from Anthropic tool call
-    functionName = toolCall.name;
-    functionArguments = toolCall.input;
-  } else {
-    // Get function name and arguments from OpenAI or Groq tool call
-    functionName = toolCall.function.name;
-    functionArguments = JSON.parse(toolCall.function.arguments);
-  }
-
-  // Handle different tool calls
+async function handleToolCall(toolCall) {
+  const functionName = toolCall.function.name;
+  const functionArguments = JSON.parse(toolCall.function.arguments);
   if (functionName === 'transcribe_youtube') {
-    // Transcribe YouTube video
     logger.info(`Transcribing YouTube: ${JSON.stringify(toolCall)}`);
     const { url } = functionArguments;
-    const urlParams = new URLSearchParams(new URL(url).search);
-    const videoId = urlParams.get('v');
+    const videoId = new URLSearchParams(new URL(url).search).get('v');
     if (!videoId) throw new Error('Invalid YouTube URL');
-    const videoDetails = await fetchVideoDetailsAndTranscribe(videoId);
+    const videoDetails = await fetchYoutubeDetailsAndTranscribe(videoId);
     return { result: videoDetails };
   }
+  if (functionName === 'transcribe_audio') {
+    logger.info(`Transcribing Audio: ${JSON.stringify(toolCall)}`);
+    const { url } = functionArguments;
+    const filePath = await downloadFile(url)
+    const transcriptionText = await transcribeMp3(path.join(AUDIO_DIR, `audio.mp3`));
+    return { result: transcriptionText };
+  }
   if (functionName === 'execute_python') {
-    // Execute Python code
     logger.info(`Executing Python tool: ${JSON.stringify(functionArguments)}`);
     return { result: await executePython(functionArguments.code) };
+  }
+  if (functionName === 'generate_image') {
+    logger.info(`Generating image: ${JSON.stringify(functionArguments)}`);
+    const { prompt, url } = functionArguments;
+    const imageResult = await generateImage(prompt, url);
+    return { result: imageResult };
+  }
+  if (functionName === 'render_latex') {
+    logger.info(`Rendering LaTeX: ${JSON.stringify(functionArguments)}`);
+    const { latexSnippet } = functionArguments;
+    const latexResult = await renderLatex(latexSnippet);
+    return { result: latexResult };
   }
 }
 

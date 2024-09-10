@@ -6,11 +6,11 @@ const { model } = require("./config.json")
 const logger = require('./logger');
 const { Client, Events, GatewayIntentBits, Collection } = require('discord.js');
 const TOKEN = process.env.TOKEN
+const createModelSelector = require('./selectMenu');
 
 //JSON.stringify complains when running into a BigInt for some reason, this happens when JSON.toString() is called on interaction object
 BigInt.prototype.toJSON = function() { return this.toString() }
 const client = new Client({ intents: [
-
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildMessages,
   GatewayIntentBits.MessageContent,
@@ -55,6 +55,10 @@ client.once(Events.ClientReady, () => {
   logger.info(`Logged in as ${client.user.tag}!`);
   client.user.setActivity(`${model}`);
   client.application.commands.set([])
+
+  // // Create the model selector message
+  // const channelId = '1276901985257390194'; // Replace with actual channel ID
+  // createModelSelector(client, channelId);
 });
 
 
