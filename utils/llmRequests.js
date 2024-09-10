@@ -79,8 +79,7 @@ async function getAIResponse(messages) {
     logger.info('Fetching AI response...');
     const content = messages.map(m => ({ role: m.role, content: m.content }));
     const payload = { model, messages: content, max_tokens: 4096 };
-    logger.info(model)
-    logger.info(payload)
+    logger.info(model);
     if (model.startsWith('claude')) {
       // Use Anthropic model
       return await createAnthropicResponse(messages, model);
@@ -97,8 +96,16 @@ async function getAIResponse(messages) {
       return await handleToolCalls(completion, messages, payload, model);
     }
   } catch (error) {
-    logger.error('Error getting AI response:', error);
-    return `Sorry, I encountered an error while trying to respond.\n\n\`\`\`${error}\`\`\``;
+    const detailedError = `
+Stack: \`\`\`${error.stack}\`\`\`
+
+Code Snippet: 
+\`\`\`
+${error.stack}
+\`\`\`
+`;
+    logger.error(detailedError);
+    return `Sorry, I encountered an error while trying to respond.\n\n${detailedError}`;
   }
 }
 
