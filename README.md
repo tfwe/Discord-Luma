@@ -24,7 +24,7 @@ A feature-rich Discord bot built with Node.js and Python. It features Large Lang
 
 1.  **Clone the repository:**
     ```bash
-    git clone <your-repo-url>
+    git clone https://github.com/tfwe/Discord-Luma.git
     cd Discord-Luma
     ```
 
